@@ -24,13 +24,26 @@ function initialize() {
         center: sf
     }
     map = new google.maps.Map(document.getElementById("map-canvas"), mapOptions);
+    google.maps.event.addListener(map, 'loading', function(){
+        console.log("loading");
+        $("#loading").show();
+    });
+    google.maps.event.addListener(map, 'loaded', function(){
+        console.log("done");
+        $("#loading").hide();
+    });
     directionsDisplay.setMap(map);
     $("#route").click(function(){calcRoute()});
     $("#via-button").click(function(){$("#via-button").before('<input type="text" class="via-point pure-input-1" placeholder="Via">')});
     calcRoute();
+
+
+    $('.handle').drags();
 }
 
 function calcRoute() {
+    google.maps.event.trigger(map, 'loading');
+
     try{
         while(overlays[0]){
             overlays.pop().setMap(null);
@@ -52,6 +65,8 @@ function calcRoute() {
         destination: $("#end-loc").val(),
         travelMode: google.maps.TravelMode.DRIVING
     };
+    var gastier = $("#gas-tier").val();
+
     if(viapoints.length !== 0) { request.waypoints = viapoints; }
 
     directionsService.route(request, function(result, status) {
@@ -88,7 +103,6 @@ function calcRoute() {
                         $("#distance").append("Stretch " + k + ": " + Math.round(dist*0.000621371192) + " miles<br />");
                     k++;
 
-
                     function geocod() {
                         geocoder.geocode({'latLng': pPoint, 'bounds': circle.getBounds()}, function(results, status) {
                         if (status == google.maps.GeocoderStatus.OK) {
@@ -102,7 +116,7 @@ function calcRoute() {
 
                                 (function(s){
                                     $.ajax({
-                                        url: buildYQL(["A", swPoint, nePoint, "48"], "gus")
+                                        url: buildYQL([gastier, swPoint, nePoint, "48"], "gus")
                                     }).done(function(data) {
                                         data = makeJSON(data);
                                         $.each(data, function(j, val) {
@@ -132,14 +146,13 @@ function calcRoute() {
                                 })(id);
                         } else if (status == google.maps.GeocoderStatus.OVER_QUERY_LIMIT ) {
                             //console.log(id + " " + status);
-                            sleep();
-                            geocod();
+                            sleep(geocod);
+
                         } else {
                             console.log(id + " " + status);
                             alert("Geocoder failed due to: " + status);
                         }
-                        sleep();
-                    });
+                        });
                     }
                     geocod();
                 })(i);
@@ -156,6 +169,7 @@ function calcRoute() {
 
             $("#distance").append("Total: " + route.legs[0].distance.text + "<br />");
         }
+        google.maps.event.trigger(map, 'loaded');
     });
 }
 
@@ -179,7 +193,7 @@ function sortTables() {
            // hidden filter input/selects will resize the columns, so try to minimize the change
            widthFixed : true,
            // initialize zebra striping and filter widgets
-           widgets: ["zebra", "filter"],
+           widgets: ["filter"],
            ignoreCase: false,
            sortList: [[1,0]],
            sortAppend: [[1,0]],
@@ -229,20 +243,41 @@ function sIDHelper(i) {
     return obj;
 }
 
-function sleep() {
+function sleep(callback) {
     setTimeout(function()
-            { }
-    , (Math.random() * 10000) + 1750);
+            { callback(); }
+    , (Math.random() * 1000) + 200);
 }
 
 function getInfoWindowEvent(marker) {
-    infowindow.close()
-    infowindow.setContent(
-        "<div class='infowindow' style='height: 125px; width: 180px'><h1>" + marker.title + "</h1>"
-        + "$" + marker.price.toString() + "<br />"
-        + marker.getPosition().toString() + "</div>"
-    );
-    infowindow.open(map, marker);
+    var data;
+    $.ajax({
+        url: buildYQL(marker.id, "gusd"),
+        beforeSend: function( xhr ) {
+            google.maps.event.trigger(map, 'loading');
+            infowindow.close();
+        }
+    })
+    .done(function(data) {
+        data = makeJSON(data)[0];
+        console.log(data);
+
+        var string = "<div class='infowindow'><h2>" + marker.title + "</h2>"
+            + data.address + ", " + data.city + "<br/>"
+            + "(Cross street: " + data.cross2 + ")<br/><br/>";
+
+        if(data.regular_gas && data.reg_price !== 0) { string += "Regular: $" + data.reg_price + " (" + data.reg_tme.toLocaleString() + ")<br />" }
+        if(data.midgrade_gas && data.mid_price !== 0) { string +=  "Mid Tier: $" + data.mid_price + " (" + data.mid_tme.toLocaleString() + ")<br />" }
+        if(data.premium_gas && data.prem_price !== 0) { string +=  "Premium: $" + data.prem_price + " (" + data.prem_tme.toLocaleString() + ")<br />" }
+        if(data.diesel && data.diesel_price !== 0) { string +=  "Diesel: $" + data.diesel_price + " (" + data.diesel_tme.toLocaleString() + ")<br />" }
+        string += "</div>";
+
+        infowindow.setContent(string);
+        infowindow.open(map, marker);
+    })
+    .always(function(){
+            google.maps.event.trigger(map, 'loaded');
+    });
 }
 
 function buildYQL(data, type)
@@ -286,25 +321,26 @@ function buildYQL(data, type)
     return yql + encodeURIComponent(string + "'" + data + "'");
 }
 
-function makeJSON(response, type)
+function makeJSON(response)
 {
     var data = response.query.results.resources.content;    // traverse YQL crud
     var JSONobj = {};
     var array = data
                 .substring(64)                              // trim AJAXPro crud
-                .match(/[^,](.+?)(?=]])/g);                // break down data structure
-                console.log(array);
+                .match(/(?:\[)(.+?)]]/g);
+                //.match(/[^,](.+?)(?=]])/g);                // break down data structure
+    //console.log(array);
     for(var i = 0; i < array.length; i++) {                // ^^^^^^
         var temp = array[i]
                 .replace(/\[/g, "{").replace(/\]/g, "}")    // replace [] with {}
                 .match(/([^{}]+)?(",*)/g);             // break into distinct pseudo-objects
-        array[i] = [{},{}];
+        array[i] = [{}];
         for(var j = 0; j < temp.length; j++)
         {
             array[i][j] = temp[j].split(/,(?![^(]*\))/g);
         }
     }
-    console.log(array);
+    //console.log(array);
 
     var structure = array[0];
     var info = array[1];
@@ -327,12 +363,12 @@ function makeJSON(response, type)
             case "System.Boolean":
                 temp[ident] = parseBool(info[j][k]);
                 break;
-            case "System.DateTime":
-                temp[ident] = eval(info[j][k].replace("newDate", "new Date")).toJSON();
-                break;
             case "System.String":
-                    temp[ident] = cleanString(info[j][k]);
-                    break;
+                temp[ident] = cleanString(info[j][k]);
+                break;
+            case "System.DateTime":
+                temp[ident] = eval(info[j][k].replace("newDate", "new Date"));
+                break;
             default:
                 temp[ident] = info[j][k];
                 break;
@@ -341,19 +377,22 @@ function makeJSON(response, type)
         JSONobj[j] = temp;
     }
 
-    //console.log(JSONobj);
+    console.log(JSONobj);
     return JSONobj;
 }
 
 function parseBool(string)
 {
-    try {
-        return !!JSON.parse(string.toLowerCase());
-    } catch (e) { }
+    //try {
+    //    return !!JSON.parse(string.toLowerCase());
+    //} catch (e) { }
+    return !!(string.toLowerCase() == "true" ? 1 : 0);
 }
 
 function cleanString(string)
 {
-    return string.substring(1, string.length-1);
+    //return string.substring(1, string.length-1);\
+    return string.replace(/"/g, "");
 }
+
 google.maps.event.addDomListener(window, 'load', initialize);
