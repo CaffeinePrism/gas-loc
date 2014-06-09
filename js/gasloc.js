@@ -8,6 +8,8 @@ Gasloc = (function(document, window){
                 zoom: 14,
                 center: new google.maps.LatLng(37.774929, -122.419416)
             },
+            dist: 100,
+            radius: 5000,
             loading: $("#loading"),
             routeButton: $("#route"),
             viaButton: $("#via-button"),
@@ -58,10 +60,13 @@ Gasloc = (function(document, window){
 
         clearData: function() {
             try{
-                while(overlays[0]){
-                    overlays.pop().setMap(null);
+                while(s.overlays[0]){
+                    s.overlays.pop().setMap(null);
                 }
+                s.gMarkers = [];
+                s.viaPoints = [];
             } catch(e) {}
+
             s.infoBox.html("");
             s.distanceInfo.html("");
         },
@@ -90,112 +95,114 @@ Gasloc = (function(document, window){
             var request = {
                 origin: s.startLoc.val(),
                 destination: s.endLoc.val(),
-                travelMode: google.maps.TravelMode.DRIVING
+                travelMode: google.maps.TravelMode.DRIVING,
+                waypoints: s.viaPoints
             };
 
-            if(s.viaPoints.length !== 0) { request.waypoints = s.viaPoints; }
+            app.googleRoute(request, function(result) {
+                var route = result.routes[0];
+                var pathPoints = route.overview_path;
 
-            this.googleRoute(request, function(result) {
-                    var route = result.routes[0];
-                    var pathPoints = route.overview_path;
+                var pt = app.whichPoint(pathPoints, s.dist);
 
-                    var pt = app.whichPoint(pathPoints, 100);
+                for (var i = 0; i < pathPoints.length; i+=pt)
+                {
+                    var pPoint = pathPoints[i];
+                    //(new google.maps.Marker({position: pathPoints[i]})).setMap(map);
+                    // anonymous wrapper to preserve loop counter in async function
+                    (function(id) {
+                        var circle = new google.maps.Circle({
+                                    center: pPoint,
+                                    radius: s.radius,
+                                    map: s.map
+                        });
+                        s.overlays.push(circle);
 
-                    var k = 0;
-                    for (var i = 0; i < pathPoints.length; i+=pt)
-                    //for(var i = 0; i < 5; i++)
-                    {
-                        //var pPoint = google.maps.geometry.spherical.interpolate(route.start_location, route.end_location, i * (.2));
-                        var pPoint = pathPoints[i];
-                        // console.log(pPoint);
-                        //(new google.maps.Marker({position: pathPoints[i]})).setMap(map);
-                        // anonymous wrapper to preserve loop counter in async function
-                        // pathPoints[i]
-                        (function(id){
-                            var circle = new google.maps.Circle({
-                                        center: pPoint,
-                                        radius: 5000,
-                                        map: s.map
-                            });
-                            s.overlays.push(circle);
+                        app.geocode(id, circle, pathPoints.length-pt);
+                    })(i);
+                }
 
-                            var start = (k == 0) ? 0 : (i-pt);
-                            console.log("from " + start + " to " + i)
-                            var dist = google.maps.geometry.spherical.computeLength(pathPoints.slice(start, i));
-                            if(k !== 0)
-                                s.distanceInfo.append("Stretch " + k + ": " + Math.round(dist*0.000621371192) + " miles<br />");
-                            k++;
-
-                            app.geocode(id, pPoint, circle, pathPoints.length-pt);
-                        })(i);
-                    }
-                    // for (var i = 0; i < pathPoints.length; i+=Math.round(pathPoints.length/5))
-                    // {
-                    //     var start = (k == 0) ? 0 : i-Math.round(pathPoints.length/5);
-                    //     console.log("from " + start + " to " + i)
-                    //     var dist = google.maps.geometry.spherical.computeLength(pathPoints.slice(start, i));
-                    //     if(k !== 0)
-                    //         s.distanceInfo.append("Stretch " + k + ": " + Math.round(dist*0.000621371192) + " miles<br />");
-                    //     k++;
-                    // }
-
-                    s.distanceInfo.append("Total: " + route.legs[0].distance.text + "<br />");
+                app.calcDistance(route);
             });
         },
 
-        geocode: function(id, pPoint, circle, max) {
-            s.geocoder.geocode({'latLng': pPoint, 'bounds': circle.getBounds()}, function(results, status) {
+        calcDistance: function(route) {
+            var pathPoints = route.overview_path;
+            var pt = app.whichPoint(pathPoints, s.dist);
+            var len = pathPoints.length;
+            var i = 1;
+            var k = pt;
+
+            while (k < len+pt)
+            {
+                var dist;
+                if(k <= len) {
+                    dist = google.maps.geometry.spherical.computeLength(pathPoints.slice(k-pt, k));
+                }
+                else {
+                    dist = google.maps.geometry.spherical.computeLength(pathPoints.slice(k-pt, len));
+                }
+                s.distanceInfo.append("Stretch " + i + ": " + Math.round(dist*0.000621371192) + " miles<br />");
+
+                k+= pt;
+                i++;
+            }
+
+            s.distanceInfo.append("Total: " + route.legs[0].distance.text + "<br />");
+        },
+
+        geocode: function(id, circle, max) {
+            var gastier = s.gasTier.val();
+            var pPoint = circle.center;
+            var circleBounds = circle.getBounds();
+            var swPoint = circleBounds.getSouthWest(); // dMin
+            var nePoint = circleBounds.getNorthEast(); // dMax
+
+            s.geocoder.geocode({'latLng': pPoint, 'bounds': circleBounds }, function(results, status) {
             if (status == google.maps.GeocoderStatus.OK) {
                     s.infoBox.append('<div class="area"><h3 class="area-title">'
                          + results[0].formatted_address
                          + '</h3><table class="pure-table" id="'+ id + '"><thead><tr><td>#</td><td>Price</td><td>Station</td></tr></thead><tbody></tbody></table></div>');
 
-                    var gastier = s.gasTier.val();
-                    var circleBounds = circle.getBounds();
-                    var swPoint = circleBounds.getSouthWest(); // dMin
-                    var nePoint = circleBounds.getNorthEast(); // dMax
-
-                    (function(t){
-                        $.ajax({
-                            url: app.buildYQL([gastier, swPoint, nePoint, "48"], "gus"),
-                            beforeSend: function( xhr ) {
-                                app.mapLoading();
-                            }
-                        }).done(function(data) {
-                            data = app.makeJSON(data);
-                            $.each(data, function(j, val) {
-                                var marker = new google.maps.Marker({
-                                    position: new google.maps.LatLng(val.lat, val.lng),
-                                    title: val.station_nm,
-                                    map: s.map,
-                                    id: val.id
-                                });
-                                marker.price = val.price;
-                                google.maps.event.addListener(marker, 'click', function(){
-                                    app.getInfoWindowEvent(marker);
-                                });
-                                s.gMarkers.push(marker);
-                                s.overlays.push(marker);
-                                var markerID = (s.gMarkers.length-1);
-                                var markerList = $("#" + t + " tbody", "#info");
-                                markerList.append('<tr id="marker-' + (markerID) + '"><td>' + (val.id) + '</td><td>'
-                                                    + val.price + '</td><td>'
-                                                    + val.station_nm + '</td></tr>'
-                                );
-                                $("#marker-"+markerID, markerList).click( function() { app.clickHandler(markerID);});
+                    $.ajax({
+                        url: app.buildYQL([gastier, swPoint, nePoint, "48"], "gus"),
+                        beforeSend: function(xhr) {
+                            app.mapLoading();
+                        }
+                    }).done(function(data) {
+                        data = app.makeJSON(data);
+                        $.each(data, function(j, val) {
+                            var marker = new google.maps.Marker({
+                                position: new google.maps.LatLng(val.lat, val.lng),
+                                title: val.station_nm,
+                                map: s.map,
+                                id: val.id
                             });
-
-                            if(id >= max)
-                            {
-                                app.mapLoaded();
-                            }
-
-                            app.sortTables();
+                            marker.price = val.price;
+                            google.maps.event.addListener(marker, 'click', function(){
+                                app.getInfoWindowEvent(marker);
+                            });
+                            s.gMarkers.push(marker);
+                            s.overlays.push(marker);
+                            var markerID = (s.gMarkers.length-1);
+                            var markerList = $("#" + id + " tbody", "#info");
+                            markerList.append('<tr id="marker-' + (markerID) + '"><td>' + (val.id) + '</td><td>'
+                                                + val.price + '</td><td>'
+                                                + val.station_nm + '</td></tr>'
+                            );
+                            $("#marker-"+markerID, markerList).click( function() { app.clickHandler(markerID);});
                         });
-                    })(id);
+
+                        if(id >= max)
+                        {
+                            app.mapLoaded();
+                        }
+
+                        app.sortTables();
+                    });
             } else if (status == google.maps.GeocoderStatus.OVER_QUERY_LIMIT ) {
                 //console.log(id + " " + status);
-                app.sleep(function() {app.geocode(id, pPoint, circle)});
+                app.sleep(function() {app.geocode(id, circle, max)});
 
             } else {
                 console.log(id + " " + status);
@@ -347,7 +354,7 @@ Gasloc = (function(document, window){
             var data;
             $.ajax({
                 url: app.buildYQL(marker.id, "gusd"),
-                beforeSend: function( xhr ) {
+                beforeSend: function(xhr) {
                     app.mapLoading();
                     s.infoWindow.close();
                 }
